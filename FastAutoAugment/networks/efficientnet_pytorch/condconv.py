@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch._six import container_abcs
+
+# from torch._six import container_abcs
+import collections.abc as container_abcs
 
 from itertools import repeat
 from functools import partial
@@ -15,6 +17,7 @@ def _ntuple(n):
         if isinstance(x, container_abcs.Iterable):
             return x
         return tuple(repeat(x, n))
+
     return parse
 
 
@@ -38,8 +41,14 @@ def _calc_same_pad(i: int, k: int, s: int, d: int):
 
 
 def conv2d_same(
-        x, weight: torch.Tensor, bias: Optional[torch.Tensor] = None, stride: Tuple[int, int] = (1, 1),
-        padding: Tuple[int, int] = (0, 0), dilation: Tuple[int, int] = (1, 1), groups: int = 1):
+    x,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    stride: Tuple[int, int] = (1, 1),
+    padding: Tuple[int, int] = (0, 0),
+    dilation: Tuple[int, int] = (1, 1),
+    groups: int = 1,
+):
     ih, iw = x.size()[-2:]
     kh, kw = weight.size()[-2:]
     pad_h = _calc_same_pad(ih, kh, stride[0], dilation[0])
@@ -54,7 +63,7 @@ def get_padding_value(padding, kernel_size, **kwargs):
     if isinstance(padding, str):
         # for any string padding, the padding will be calculated for you, one of three ways
         padding = padding.lower()
-        if padding == 'same':
+        if padding == "same":
             # TF compatible 'SAME' padding, has a performance and GPU memory allocation impact
             if _is_static_pad(kernel_size, **kwargs):
                 # static case, no extra overhead
@@ -63,7 +72,7 @@ def get_padding_value(padding, kernel_size, **kwargs):
                 # dynamic padding
                 padding = 0
                 dynamic = True
-        elif padding == 'valid':
+        elif padding == "valid":
             # 'VALID' padding, same as padding=0
             padding = 0
         else:
@@ -76,23 +85,43 @@ def get_condconv_initializer(initializer, num_experts, expert_shape):
     def condconv_initializer(weight):
         """CondConv initializer function."""
         num_params = np.prod(expert_shape)
-        if (len(weight.shape) != 2 or weight.shape[0] != num_experts or weight.shape[1] != num_params):
-            raise (ValueError('CondConv variables must have shape [num_experts, num_params]'))
+        if (
+            len(weight.shape) != 2
+            or weight.shape[0] != num_experts
+            or weight.shape[1] != num_params
+        ):
+            raise (
+                ValueError(
+                    "CondConv variables must have shape [num_experts, num_params]"
+                )
+            )
         for i in range(num_experts):
             initializer(weight[i].view(expert_shape))
+
     return condconv_initializer
 
 
 class CondConv2d(nn.Module):
-    """ Conditional Convolution
+    """Conditional Convolution
     Inspired by: https://github.com/tensorflow/tpu/blob/master/models/official/efficientnet/condconv/condconv_layers.py
     Grouped convolution hackery for parallel execution of the per-sample kernel filters inspired by this discussion:
     https://github.com/pytorch/pytorch/issues/17983
     """
-    __constants__ = ['bias', 'in_channels', 'out_channels', 'dynamic_padding']
 
-    def __init__(self, in_channels, out_channels, kernel_size=3,
-                 stride=1, padding='', dilation=1, groups=1, bias=False, num_experts=4):
+    __constants__ = ["bias", "in_channels", "out_channels", "dynamic_padding"]
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size=3,
+        stride=1,
+        padding="",
+        dilation=1,
+        groups=1,
+        bias=False,
+        num_experts=4,
+    ):
         super(CondConv2d, self).__init__()
         assert num_experts > 1
 
@@ -104,24 +133,35 @@ class CondConv2d(nn.Module):
         self.out_channels = out_channels
         self.kernel_size = _pair(kernel_size)
         self.stride = _pair(stride)
-        padding_val, is_padding_dynamic = get_padding_value(padding, kernel_size, stride=stride, dilation=dilation)
-        self.dynamic_padding = is_padding_dynamic  # if in forward to work with torchscript
+        padding_val, is_padding_dynamic = get_padding_value(
+            padding, kernel_size, stride=stride, dilation=dilation
+        )
+        self.dynamic_padding = (
+            is_padding_dynamic  # if in forward to work with torchscript
+        )
         self.padding = _pair(padding_val)
         self.dilation = _pair(dilation)
         self.groups = groups
         self.num_experts = num_experts
 
-        self.weight_shape = (self.out_channels, self.in_channels // self.groups) + self.kernel_size
+        self.weight_shape = (
+            self.out_channels,
+            self.in_channels // self.groups,
+        ) + self.kernel_size
         weight_num_param = 1
         for wd in self.weight_shape:
             weight_num_param *= wd
-        self.weight = torch.nn.Parameter(torch.Tensor(self.num_experts, weight_num_param))
+        self.weight = torch.nn.Parameter(
+            torch.Tensor(self.num_experts, weight_num_param)
+        )
 
         if bias:
             self.bias_shape = (self.out_channels,)
-            self.bias = torch.nn.Parameter(torch.Tensor(self.num_experts, self.out_channels))
+            self.bias = torch.nn.Parameter(
+                torch.Tensor(self.num_experts, self.out_channels)
+            )
         else:
-            self.register_parameter('bias', None)
+            self.register_parameter("bias", None)
 
         self.reset_parameters()
 
@@ -134,20 +174,31 @@ class CondConv2d(nn.Module):
         fan_in = num_input_fmaps * receptive_field_size
         fan_out = num_output_fmaps * receptive_field_size
 
-        init_weight = get_condconv_initializer(partial(nn.init.normal_, mean=0.0, std=np.sqrt(2.0 / fan_out)), self.num_experts, self.weight_shape)
+        init_weight = get_condconv_initializer(
+            partial(nn.init.normal_, mean=0.0, std=np.sqrt(2.0 / fan_out)),
+            self.num_experts,
+            self.weight_shape,
+        )
         init_weight(self.weight)
         if self.bias is not None:
             # fan_in = np.prod(self.weight_shape[1:])
             # bound = 1 / math.sqrt(fan_in)
-            init_bias = get_condconv_initializer(partial(nn.init.constant_, val=0), self.num_experts, self.bias_shape)
+            init_bias = get_condconv_initializer(
+                partial(nn.init.constant_, val=0), self.num_experts, self.bias_shape
+            )
             init_bias(self.bias)
 
     def forward(self, x, routing_weights):
         x_orig = x
         B, C, H, W = x.shape
-        weight = torch.matmul(routing_weights, self.weight)     # (Expert x out x in x 3x3) --> (B x out x in x 3x3)
-        new_weight_shape = (B * self.out_channels, self.in_channels // self.groups) + self.kernel_size
-        weight = weight.view(new_weight_shape)                  # (B*out x in x 3 x 3)
+        weight = torch.matmul(
+            routing_weights, self.weight
+        )  # (Expert x out x in x 3x3) --> (B x out x in x 3x3)
+        new_weight_shape = (
+            B * self.out_channels,
+            self.in_channels // self.groups,
+        ) + self.kernel_size
+        weight = weight.view(new_weight_shape)  # (B*out x in x 3 x 3)
         bias = None
         if self.bias is not None:
             bias = torch.matmul(routing_weights, self.bias)
@@ -156,15 +207,29 @@ class CondConv2d(nn.Module):
         x = x.view(1, B * C, H, W)
         if self.dynamic_padding:
             out = conv2d_same(
-                x, weight, bias, stride=self.stride, padding=self.padding,
-                dilation=self.dilation, groups=self.groups * B)
+                x,
+                weight,
+                bias,
+                stride=self.stride,
+                padding=self.padding,
+                dilation=self.dilation,
+                groups=self.groups * B,
+            )
         else:
             out = F.conv2d(
-                x, weight, bias, stride=self.stride, padding=self.padding,
-                dilation=self.dilation, groups=self.groups * B)
+                x,
+                weight,
+                bias,
+                stride=self.stride,
+                padding=self.padding,
+                dilation=self.dilation,
+                groups=self.groups * B,
+            )
 
         # out : (1 x B*out x ...)
-        out = out.permute([1, 0, 2, 3]).view(B, self.out_channels, out.shape[-2], out.shape[-1])
+        out = out.permute([1, 0, 2, 3]).view(
+            B, self.out_channels, out.shape[-2], out.shape[-1]
+        )
 
         # out2 = self.forward_legacy(x_orig, routing_weights)
         # lt = torch.lt(torch.abs(torch.add(out, -out2)), 1e-8)
@@ -175,7 +240,9 @@ class CondConv2d(nn.Module):
     def forward_legacy(self, x, routing_weights):
         # Literal port (from TF definition)
         B, C, H, W = x.shape
-        weight = torch.matmul(routing_weights, self.weight)  # (Expert x out x in x 3x3) --> (B x out x in x 3x3)
+        weight = torch.matmul(
+            routing_weights, self.weight
+        )  # (Expert x out x in x 3x3) --> (B x out x in x 3x3)
         x = torch.split(x, 1, 0)
         weight = torch.split(weight, 1, 0)
         if self.bias is not None:
@@ -192,8 +259,16 @@ class CondConv2d(nn.Module):
             wi = wi.view(*self.weight_shape)
             if bi is not None:
                 bi = bi.view(*self.bias_shape)
-            out.append(conv_fn(
-                xi, wi, bi, stride=self.stride, padding=self.padding,
-                dilation=self.dilation, groups=self.groups))
+            out.append(
+                conv_fn(
+                    xi,
+                    wi,
+                    bi,
+                    stride=self.stride,
+                    padding=self.padding,
+                    dilation=self.dilation,
+                    groups=self.groups,
+                )
+            )
         out = torch.cat(out, 0)
         return out
