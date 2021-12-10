@@ -1,5 +1,6 @@
 import copy
 import os
+import pickle
 import sys
 import time
 from collections import OrderedDict, defaultdict
@@ -12,7 +13,7 @@ import ray
 import gorilla
 from ray.tune.trial import Trial
 from ray.tune.trial_runner import TrialRunner
-from ray.tune.suggest import HyperOptSearch
+from ray.tune.suggest.hyperopt import HyperOptSearch
 from ray.tune import register_trainable, run_experiments
 from tqdm import tqdm
 
@@ -68,7 +69,7 @@ def _get_path(dataset, model, tag):
     return os.path.join(
         os.path.dirname(os.path.realpath(__file__)),
         "models/%s_%s_%s.model" % (dataset, model, tag),
-    )  # TODO
+    )  # TODO -- dir is same as this file's and "models" is hardcoded
 
 
 @ray.remote(num_cpus=4, num_gpus=1, max_calls=1)
@@ -103,7 +104,7 @@ def train_model(
     return C.get()["model"]["type"], cv_fold, result
 
 
-def eval_tta(config, augment, reporter):
+def eval_tta(config, augment, checkpoint_dir=None):
     C.get()
     C.get().conf = config
     cv_ratio_test, cv_fold, save_path = (
@@ -180,7 +181,7 @@ def eval_tta(config, augment, reporter):
     del model
     metrics = metrics / "cnt"
     gpu_secs = (time.time() - start_t) * torch.cuda.device_count()
-    reporter(
+    ray.tune.report(
         minus_loss=metrics["minus_loss"],
         top1_valid=metrics["correct"],
         elapsed_time=gpu_secs,
@@ -212,6 +213,7 @@ if __name__ == "__main__":
     parser.add_argument("--per-class", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--smoke-test", action="store_true")
+    parser.add_argument("--output-dir", "-o", type=str, default="/tmp")
     args = parser.parse_args()
 
     logger.info("args: %s", args)
@@ -226,7 +228,7 @@ if __name__ == "__main__":
     add_filehandler(
         logger,
         os.path.join(
-            "models",
+            "models",  # TODO -- path is hardcoded to "./models"
             "%s_%s_cv%.1f.log"
             % (C.get()["dataset"], C.get()["model"]["type"], args.cv_ratio),
         ),
@@ -332,6 +334,8 @@ if __name__ == "__main__":
     if args.until == 1:
         sys.exit(0)
 
+    # -----------------------------------------------------------------------
+    # -----------------------------------------------------------------------
     logger.info("----- Search Test-Time Augmentation Policies -----")
     w.start(tag="search")
 
@@ -350,6 +354,8 @@ if __name__ == "__main__":
     final_policy_set = []
     total_computation = 0
     reward_attr = "top1_valid"  # top1_valid or minus_loss
+    logger.info("reward_attr: %s", reward_attr)
+
     for _ in range(1):  # run multiple times.
         for cv_fold in range(cv_num):
             name = "search_%s_%s_fold%d_ratio%.1f" % (
@@ -358,12 +364,28 @@ if __name__ == "__main__":
                 cv_fold,
                 args.cv_ratio,
             )
-            print(name)
+            logger.info("trainable: %s", name)
+            # checkpoint_dir=None prevents checkpointing from being removed.  Warning without it:
+            # WARNING function_runner.py:561 -- Function checkpointing is disabled. This may result
+            # in unexpected behavior when using checkpointing features or certain schedulers.
+            # To enable, set the train function arguments to be `func(config, checkpoint_dir=None)`.
             register_trainable(
-                name, lambda augs, rpt: eval_tta(copy.deepcopy(copied_c), augs, rpt)
+                name,
+                lambda augs, checkpoint_dir=None: eval_tta(
+                    copy.deepcopy(copied_c), augs, checkpoint_dir=checkpoint_dir
+                ),
             )
-            algo = HyperOptSearch(space, max_concurrent=4 * 20, reward_attr=reward_attr)
 
+            # jr notes for ray v1.9.0
+            # max_concurrent is deprecated.
+            #   DeprecationWarning: `max_concurrent` is deprecated for this search
+            #   algorithm.  Use tune.suggest.ConcurrencyLimiter() instead. This will
+            #   raise an error in future versions of Ray.
+            # `reward_attr`` was removed
+            # algo = HyperOptSearch(space, max_concurrent=4 * 20, reward_attr=reward_attr)
+            algo = HyperOptSearch(space, metric=reward_attr, mode="min")
+
+            """
             exp_config = {
                 name: {
                     "run": name,
@@ -389,8 +411,48 @@ if __name__ == "__main__":
                 resume=args.resume,
                 raise_on_failed_trial=False,
             )
-            print()
-            results = [x for x in results if x.last_result is not None]
+            """
+
+            config = {
+                "dataroot": args.dataroot,
+                "save_path": paths[cv_fold],
+                "cv_ratio_test": args.cv_ratio,
+                "cv_fold": cv_fold,
+                "num_op": args.num_op,
+                "num_policy": args.num_policy,
+            }
+            # jr: removed scheduler=None, queue_trials=True (deprecated)
+            analysis = ray.tune.run(
+                name,
+                config=config,
+                search_alg=algo,
+                num_samples=4 if args.smoke_test else args.num_search,
+                resources_per_trial={"gpu": 1, "cpu": 4},
+                stop={"training_iteration": args.num_policy},
+                verbose=1,
+                resume=args.resume,
+                raise_on_failed_trial=False,
+                # max_concurrent=4 * 20,
+            )
+
+            logger.info("trial stats: %s", analysis.stats())
+
+            with open(os.path.join(args.output_dir, "results.pickle"), "wb") as fobj:
+                pickle.dump(
+                    {
+                        "trial_dataframes": analysis.trial_dataframes,
+                        "results": analysis.results,
+                        "results_df": analysis.results_df,
+                    },
+                    fobj,
+                )
+
+            results = analysis.trials
+            # results is of type ray.tune.ExperimentAnalysis
+            # https://docs.ray.io/en/latest/tune/api_docs/analysis.html#ray.tune.ExperimentAnalysis
+            results = [
+                x for x in results if x.last_result
+            ]  # x.last_result is a dict or None
             results = sorted(
                 results, key=lambda x: x.last_result[reward_attr], reverse=True
             )
@@ -404,7 +466,7 @@ if __name__ == "__main__":
                     result.config, args.num_policy, args.num_op
                 )
                 logger.info(
-                    "loss=%.12f top1_valid=%.4f %s"
+                    "minus_loss=%.12f top1_valid=%.4f policy=%s"
                     % (
                         result.last_result["minus_loss"],
                         result.last_result["top1_valid"],
@@ -421,6 +483,9 @@ if __name__ == "__main__":
         "processed in %.4f secs, gpu hours=%.4f"
         % (w.pause("search"), total_computation / 3600.0)
     )
+
+    # -----------------------------------------------------------------------
+    # -----------------------------------------------------------------------
     logger.info(
         "----- Train with Augmentations model=%s dataset=%s aug=%s ratio(test)=%.1f -----"
         % (C.get()["model"]["type"], C.get()["dataset"], C.get()["aug"], args.cv_ratio)
