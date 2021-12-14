@@ -42,7 +42,7 @@ _CIFAR_MEAN, _CIFAR_STD = (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
 
 
 def get_dataloaders(
-    dataset, batch, dataroot, split=0.15, split_idx=0, multinode=False, target_lb=-1
+    dataset, batch, dataroot, split=0.15, split_idx=0, multinode=False, target_lb=-1, pin_memory=False,
 ):
     if "cifar" in dataset or "svhn" in dataset:
         transform_train = transforms.Compose(
@@ -324,7 +324,7 @@ def get_dataloaders(
         batch_size=batch,
         shuffle=True if train_sampler is None else False,
         num_workers=8,
-        pin_memory=True,
+        pin_memory=pin_memory,
         sampler=train_sampler,
         drop_last=True,
     )
@@ -334,7 +334,7 @@ def get_dataloaders(
         batch_size=batch,
         shuffle=False,
         num_workers=4,
-        pin_memory=True,
+        pin_memory=pin_memory,
         sampler=valid_sampler,
         drop_last=False,
     )
@@ -344,7 +344,7 @@ def get_dataloaders(
         batch_size=batch,
         shuffle=False,
         num_workers=8,
-        pin_memory=True,
+        pin_memory=pin_memory,
         drop_last=False,
     )
     return train_sampler, trainloader, validloader, testloader
