@@ -261,19 +261,6 @@ if __name__ == "__main__":
     # 0. Initialize Ray
     # -----------------------------------------------------------------------
     logger.info("initialize ray...")
-    # ray.init(redis_address=args.redis)
-    conda_packages = [
-        "torch",
-    ]
-    pip_packages = [
-        "git+https://github.com/wbaek/theconf@de32022f8c0651a043dc812d17194cdfd62066e8",
-        "git+https://github.com/jraman/fast-autoaugment.git@ray",
-    ]
-    pip_env = {"pip": pip_packages}
-    conda_env = {
-        "conda": {"dependencies": ["torch", "pip", pip_env]},
-    }
-    env = pip_env
     ray.init()
 
     # ray.init(local_mode=True)
@@ -321,8 +308,6 @@ if __name__ == "__main__":
         )
         for i in range(cv_num)
     ]
-
-    # time.sleep(600)
 
     tqdm_epoch = tqdm(range(C.get()["epoch"]))
     logger.info("num epochs: %s", tqdm_epoch)
@@ -417,34 +402,6 @@ if __name__ == "__main__":
             # `reward_attr`` was removed
             # algo = HyperOptSearch(space, max_concurrent=4 * 20, reward_attr=reward_attr)
             algo = HyperOptSearch(space, metric=reward_attr, mode="min")
-
-            """
-            exp_config = {
-                name: {
-                    "run": name,
-                    "num_samples": 4 if args.smoke_test else args.num_search,
-                    "resources_per_trial": {"gpu": 1},
-                    "stop": {"training_iteration": args.num_policy},
-                    "config": {
-                        "dataroot": args.dataroot,
-                        "save_path": paths[cv_fold],
-                        "cv_ratio_test": args.cv_ratio,
-                        "cv_fold": cv_fold,
-                        "num_op": args.num_op,
-                        "num_policy": args.num_policy,
-                    },
-                }
-            }
-            results = run_experiments(
-                exp_config,
-                search_alg=algo,
-                scheduler=None,
-                verbose=0,
-                queue_trials=True,
-                resume=args.resume,
-                raise_on_failed_trial=False,
-            )
-            """
 
             config = {
                 "dataroot": args.dataroot,
