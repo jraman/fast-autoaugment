@@ -128,6 +128,7 @@ def eval_tta(config, augment, checkpoint_dir=None):
         model.load_state_dict(ckpt)
     model.eval()
 
+    # each loader is of type torch.utils.data.dataloader._MultiProcessingDataLoaderIter
     loaders = []
     for _ in range(augment["num_policy"]):  # TODO
         _, tl, validloader, tl2 = get_dataloaders(
@@ -143,12 +144,14 @@ def eval_tta(config, augment, checkpoint_dir=None):
     start_t = time.time()
     metrics = Accumulator()
     loss_fn = torch.nn.CrossEntropyLoss(reduction="none")
+    # TODO jr: does it iterate through all the loaders?
+    #          or does it stop after exhausting just the first loader?
     try:
         while True:
             losses = []
             corrects = []
             for loader in loaders:
-                data, label = next(loader)
+                data, label = next(loader)  # StopIteration is thrown here
                 data = data.cuda()
                 label = label.cuda()
 
@@ -507,8 +510,8 @@ if __name__ == "__main__":
                 final_policy = remove_deplicates(final_policy)
                 final_policy_set.extend(final_policy)
 
-    logger.info(json.dumps(final_policy_set))
     logger.info("final_policy length=%d" % len(final_policy_set))
+    logger.info(json.dumps(final_policy_set))
     logger.info(
         "processed in %.4f secs, gpu hours=%.4f"
         % (w.pause("search"), total_computation / 3600.0)
