@@ -1,8 +1,3 @@
-import pathlib
-import sys
-
-sys.path.append(str(pathlib.Path(__file__).parent.parent.absolute()))
-
 import itertools
 import json
 import logging
@@ -19,6 +14,10 @@ import torch.distributed as dist
 
 from tqdm import tqdm
 from theconf import Config as C, ConfigArgumentParser
+
+# import pathlib
+# import sys
+# sys.path.append(str(pathlib.Path(__file__).parent.parent.absolute()))
 
 from FastAutoAugment.common import get_logger, EMA, add_filehandler
 from FastAutoAugment.data import get_dataloaders
@@ -145,6 +144,7 @@ def run_epoch(
             writer.add_scalar(key, value, epoch)
     return metrics
 
+
 # -----------------------------------------------------------------------
 # train_and_eval
 # -----------------------------------------------------------------------
@@ -178,7 +178,6 @@ def train_and_eval(
         local_rank,
         evaluation_interval,
     )
-    total_batch = C.get()["batch"]
     if local_rank >= 0:
         dist.init_process_group(
             backend="nccl",
@@ -190,9 +189,9 @@ def train_and_eval(
 
         C.get()["lr"] *= dist.get_world_size()
         logger.info(
-            f'local batch={C.get()["batch"]} world_size={dist.get_world_size()} ----> total batch={C.get()["batch"] * dist.get_world_size()}'
+            f'local batch={C.get()["batch"]} world_size={dist.get_world_size()}'
+            f' ----> total batch={C.get()["batch"] * dist.get_world_size()}'
         )
-        total_batch = C.get()["batch"] * dist.get_world_size()
 
     is_master = local_rank < 0 or dist.get_rank() == 0
     logger.debug("is_master: %s", is_master)
@@ -580,26 +579,47 @@ if __name__ == "__main__":
         default="/data/private/pretrainedmodels",
         help="torchvision data folder",
     )
-    parser.add_argument("--save", type=str, default="test.pth")
+    parser.add_argument(
+        "--model-file-path",
+        type=str,
+        default="model.pth",
+        help="For --only-eval, full path of the model file to use."
+        "For training, without --only-eval, full path of checkpoint file to be saved.",
+    )
     parser.add_argument("--cv-ratio", type=float, default=0.0)
     parser.add_argument("--cv", type=int, default=0)
     parser.add_argument("--local_rank", type=int, default=-1)
     parser.add_argument("--evaluation-interval", type=int, default=5)
     parser.add_argument("--only-eval", action="store_true")
+    parser.add_argument(
+        "--output-dir", type=str, default="/tmp", help="output dir for logs."
+    )
     args = parser.parse_args()
+
+    aug = C.get()["aug"]
+    aug = len(aug) if isinstance(aug, (list, tuple)) else aug
+
+    add_filehandler(
+        logger,
+        os.path.join(
+            args.output_dir,
+            "%s_%s_%s.log" % (C.get()["dataset"], C.get()["model"]["type"], aug),
+        ),
+    )
 
     logger.info("args: %s", args)
 
     assert (
-        args.only_eval and args.save
+        args.only_eval and args.model_file_path
     ) or not args.only_eval, "checkpoint path not provided in evaluation mode."
 
     if not args.only_eval:
-        if args.save:
-            logger.info("checkpoint will be saved at %s" % args.save)
+        if args.model_file_path:
+            logger.info("checkpoint will be saved at %s" % args.model_file_path)
         else:
             logger.warning(
-                "Provide --save argument to save the checkpoint. Without it, training result will not be saved!"
+                "Provide --model-file and --output-dir to save the checkpoint."
+                " Without it, training result will not be saved!"
             )
 
     logger.info("model: %s" % C.get()["model"])
@@ -614,7 +634,7 @@ if __name__ == "__main__":
         args.dataroot,
         test_ratio=args.cv_ratio,
         cv_fold=args.cv,
-        save_path=args.save,
+        save_path=args.model_file_path,
         only_eval=args.only_eval,
         local_rank=args.local_rank,
         metric="test",
@@ -631,4 +651,4 @@ if __name__ == "__main__":
     logger.info("\n" + json.dumps(result, indent=4))
     logger.info("elapsed time: %.3f Hours" % (elapsed / 3600.0))
     logger.info("top1 error in testset: %.4f" % (1.0 - result["top1_test"]))
-    logger.info(args.save)
+    logger.info("model file: %s", args.model_file_path)
