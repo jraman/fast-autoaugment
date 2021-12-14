@@ -9,6 +9,7 @@ import logging
 import math
 import os
 from collections import OrderedDict
+import time
 
 import torch
 from torch import nn, optim
@@ -144,7 +145,9 @@ def run_epoch(
             writer.add_scalar(key, value, epoch)
     return metrics
 
-
+# -----------------------------------------------------------------------
+# train_and_eval
+# -----------------------------------------------------------------------
 def train_and_eval(
     tag,
     dataroot,
@@ -420,7 +423,7 @@ def train_and_eval(
         return result
 
     # train loop
-    best_top1 = 0
+    result["best_top1"] = 0.0
     for epoch in range(epoch_start, max_epoch + 1):
         if local_rank >= 0:
             trainsampler.set_epoch(epoch)
@@ -522,9 +525,9 @@ def train_and_eval(
                 f'[test] loss={rs["test"]["loss"]:.4f} top1={rs["test"]["top1"]:.4f} '
             )
 
-            if metric == "last" or rs[metric]["top1"] > best_top1:
+            if metric == "last" or rs[metric]["top1"] > result["best_top1"]:
                 if metric != "last":
-                    best_top1 = rs[metric]["top1"]
+                    result["best_top1"] = rs[metric]["top1"]
                 for key, setname in itertools.product(
                     ["loss", "top1", "top5"], ["train", "valid", "test"]
                 ):
@@ -545,7 +548,7 @@ def train_and_eval(
                 if is_master and save_path:
                     logger.info(
                         "save model@%d to %s, err=%.4f"
-                        % (epoch, save_path, 1 - best_top1)
+                        % (epoch, save_path, 1 - result["best_top1"])
                     )
                     torch.save(
                         {
@@ -564,7 +567,7 @@ def train_and_eval(
 
     del model
 
-    result["top1_test"] = best_top1
+    # result["top1_test"] = best_top1
     return result
 
 
@@ -599,7 +602,11 @@ if __name__ == "__main__":
                 "Provide --save argument to save the checkpoint. Without it, training result will not be saved!"
             )
 
-    import time
+    logger.info("model: %s" % C.get()["model"])
+    if isinstance(C.get()["aug"], list):
+        logger.info("num augmentations in conf: %s", len(C.get()["aug"]))
+    else:
+        logger.info("augmentation: %s", C.get()["aug"])
 
     t = time.time()
     result = train_and_eval(
@@ -617,7 +624,10 @@ if __name__ == "__main__":
 
     logger.info("done.")
     logger.info("model: %s" % C.get()["model"])
-    logger.info("augmentation: %s" % C.get()["aug"])
+    if isinstance(C.get()["aug"], list):
+        logger.info("num augmentations in conf: %s", len(C.get()["aug"]))
+    else:
+        logger.info("augmentation: %s", C.get()["aug"])
     logger.info("\n" + json.dumps(result, indent=4))
     logger.info("elapsed time: %.3f Hours" % (elapsed / 3600.0))
     logger.info("top1 error in testset: %.4f" % (1.0 - result["top1_test"]))
