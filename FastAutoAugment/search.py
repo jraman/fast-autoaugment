@@ -422,7 +422,7 @@ if __name__ == "__main__":
                 verbose=1,
                 resume=args.resume,
                 raise_on_failed_trial=False,
-                # max_concurrent=4 * 20,
+                # max_concurrent_trials=4 * 20,
             )
 
             logger.info("trial stats: %s", analysis.stats())
