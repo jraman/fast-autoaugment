@@ -7,6 +7,7 @@ hyperopt
 
 git+https://github.com/jraman/fast-autoaugment.git@ray
 
+google-cloud-storage  # >=1.43.0
 gorilla
 matplotlib
 pretrainedmodels

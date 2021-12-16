@@ -1,13 +1,12 @@
 import copy
 import os
-import pickle
 import sys
 import time
 from collections import OrderedDict, defaultdict
 
 import torch
-
 import numpy as np
+
 from hyperopt import hp
 import ray
 import ray.tune
@@ -19,7 +18,7 @@ from tqdm import tqdm
 
 from FastAutoAugment.archive import remove_deplicates, policy_decoder
 from FastAutoAugment.augmentations import augment_list
-from FastAutoAugment.common import get_logger, add_filehandler
+from FastAutoAugment.common import get_logger, add_filehandler, model_load, model_save, parse_path, urlunparse
 from FastAutoAugment.data import get_dataloaders
 from FastAutoAugment.metrics import Accumulator
 from FastAutoAugment.networks import get_model, num_class
@@ -67,22 +66,36 @@ gorilla.apply(patch)
 logger = get_logger("Fast AutoAugment")
 
 
-def _get_path(dataset, model, tag, basepath="/tmp"):
-    return os.path.join(
+def _get_path(dataset, model, tag, basepath="/tmp", cloud="", bucket=""):
+    """
+    Creates a base filename for the model file using
+    (dataset, model, tag)
+    """
+    path = os.path.join(
         basepath,
         "%s_%s_%s.model" % (dataset, model, tag),
     )
+    return urlunparse(path, cloud, bucket)
 
 
 @ray.remote(num_cpus=4, num_gpus=1, max_calls=1)
 def train_model(
-    config, dataroot, augment, cv_ratio_test, cv_fold, save_path=None, skip_exist=False
+    config,
+    dataroot,
+    augment,
+    cv_ratio_test,
+    cv_fold,
+    save_path=None,
+    skip_exist=False,
+    board_tag=None,
+    cloud="",
+    bucket="",
 ):
     logger.info("cuda: %s", torch.cuda.is_available())
     logger.info(
         "train_model: "
         "config=%s, dataroot=%s, augment=%s, cv_ratio_test=%s, cv_fold=%s, "
-        "save_path=%s, skip_exist=%s",
+        "save_path=%s, skip_exist=%s, cloud=%s, bucket=%s",
         config,
         dataroot,
         augment,
@@ -90,18 +103,22 @@ def train_model(
         cv_fold,
         save_path,
         skip_exist,
+        cloud,
+        bucket,
     )
     C.get()
     C.get().conf = config
     C.get()["aug"] = augment
 
     result = train_and_eval(
-        None,
+        board_tag,
         dataroot,
         cv_ratio_test,
         cv_fold,
         save_path=save_path,
         only_eval=skip_exist,
+        cloud=cloud,
+        bucket=bucket,
     )
     return C.get()["model"]["type"], cv_fold, result
 
@@ -121,7 +138,7 @@ def eval_tta(config, augment, checkpoint_dir=None):
 
     # get_model(model_name, dataset_name)
     model = get_model(C.get()["model"], num_class(C.get()["dataset"]))
-    ckpt = torch.load(save_path)
+    ckpt = model_load(save_path)
     if "model" in ckpt:
         model.load_state_dict(ckpt["model"])
     else:
@@ -225,11 +242,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--decay", type=float, default=-1, help="Value of lambda for L2 regularization"
     )
-    # parser.add_argument("--redis", type=str, default="gpu-cloud-vnode30.dakao.io:23655")
+    # parser.add_argument("--redis", type=str, default="gpu-cloud-vnode3.dakao.io:2365")
     parser.add_argument("--per-class", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--output-dir", "-o", type=str, default="/tmp")
+    parser.add_argument("--board-tag", type=str, default="", help="Tensorboard tag.")
     args = parser.parse_args()
 
     logger.info("args: %s", args)
@@ -243,17 +261,20 @@ if __name__ == "__main__":
             args.num_search = 4
             logger.info("num_search set to 4 for smoke-test")
 
-    if not os.path.exists(args.output_dir):
-        os.mkdir(args.output_dir)
+    cloud, bucket, output_path = parse_path(args.output_dir)
 
-    add_filehandler(
-        logger,
-        os.path.join(
-            args.output_dir,
-            "%s_%s_cv%.1f.log"
-            % (C.get()["dataset"], C.get()["model"]["type"], args.cv_ratio),
-        ),
-    )
+    if not cloud and not os.path.exists(output_path):
+        os.mkdir(output_path)
+
+    if not cloud:
+        add_filehandler(
+            logger,
+            os.path.join(
+                output_path,
+                "%s_%s_cv%.1f.log"
+                % (C.get()["dataset"], C.get()["model"]["type"], args.cv_ratio),
+            ),
+        )
     logger.info("configuration...")
     logger.info(json.dumps(C.get().conf, sort_keys=True, indent=4))
 
@@ -291,11 +312,14 @@ if __name__ == "__main__":
             C.get()["dataset"],
             C.get()["model"]["type"],
             "ratio%.1f_fold%d" % (args.cv_ratio, i),
-            basepath=args.output_dir,
+            basepath=output_path,
+            cloud=cloud,
+            bucket=bucket,
         )
         for i in range(cv_num)
     ]
     logger.info("paths: %s", paths)
+
     reqs = [
         train_model.remote(
             copy.deepcopy(copied_c),
@@ -305,6 +329,9 @@ if __name__ == "__main__":
             i,
             save_path=paths[i],
             skip_exist=True,
+            board_tag=args.board_tag,
+            cloud=cloud,
+            bucket=bucket,
         )
         for i in range(cv_num)
     ]
@@ -317,7 +344,7 @@ if __name__ == "__main__":
             epochs_per_cv = OrderedDict()
             for cv_idx in range(cv_num):
                 try:
-                    latest_ckpt = torch.load(paths[cv_idx])
+                    latest_ckpt = model_load(paths[cv_idx])
                     if "epoch" not in latest_ckpt:
                         epochs_per_cv["cv%d" % (cv_idx + 1)] = C.get()["epoch"]
                         continue
@@ -427,15 +454,14 @@ if __name__ == "__main__":
 
             logger.info("trial stats: %s", analysis.stats())
 
-            with open(os.path.join(args.output_dir, "results.pickle"), "wb") as fobj:
-                pickle.dump(
-                    {
-                        "trial_dataframes": analysis.trial_dataframes,
-                        "results": analysis.results,
-                        "results_df": analysis.results_df,
-                    },
-                    fobj,
-                )
+            results_obj = {
+                "trial_dataframes": analysis.trial_dataframes,
+                "results": analysis.results,
+                "results_df": analysis.results_df,
+            }
+            results_obj_path = os.path.join(output_path, "results.pickle")
+            results_obj_path = urlunparse(results_obj_path, cloud, bucket)
+            model_save(results_obj, results_obj_path)
 
             results = analysis.trials
             # results is of type ray.tune.ExperimentAnalysis
@@ -491,7 +517,9 @@ if __name__ == "__main__":
             C.get()["dataset"],
             C.get()["model"]["type"],
             "ratio%.1f_default%d" % (args.cv_ratio, _),
-            basepath=args.output_dir,
+            basepath=output_path,
+            cloud=cloud,
+            bucket=bucket,
         )
         for _ in range(num_experiments)
     ]
@@ -500,7 +528,9 @@ if __name__ == "__main__":
             C.get()["dataset"],
             C.get()["model"]["type"],
             "ratio%.1f_augment%d" % (args.cv_ratio, _),
-            basepath=args.output_dir,
+            basepath=output_path,
+            cloud=cloud,
+            bucket=bucket,
         )
         for _ in range(num_experiments)
     ]
@@ -534,15 +564,13 @@ if __name__ == "__main__":
             epochs = OrderedDict()
             for exp_idx in range(num_experiments):
                 try:
-                    if os.path.exists(default_path[exp_idx]):
-                        latest_ckpt = torch.load(default_path[exp_idx])
-                        epochs["default_exp%d" % (exp_idx + 1)] = latest_ckpt["epoch"]
+                    latest_ckpt = model_load(default_path[exp_idx])
+                    epochs["default_exp%d" % (exp_idx + 1)] = latest_ckpt["epoch"]
                 except Exception:
                     pass
                 try:
-                    if os.path.exists(augment_path[exp_idx]):
-                        latest_ckpt = torch.load(augment_path[exp_idx])
-                        epochs["augment_exp%d" % (exp_idx + 1)] = latest_ckpt["epoch"]
+                    latest_ckpt = model_load(augment_path[exp_idx])
+                    epochs["augment_exp%d" % (exp_idx + 1)] = latest_ckpt["epoch"]
                 except Exception:
                     pass
 

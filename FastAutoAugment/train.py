@@ -19,7 +19,7 @@ from theconf import Config as C, ConfigArgumentParser
 # import sys
 # sys.path.append(str(pathlib.Path(__file__).parent.parent.absolute()))
 
-from FastAutoAugment.common import get_logger, EMA, add_filehandler
+from FastAutoAugment.common import get_logger, EMA, add_filehandler, model_load, model_save
 from FastAutoAugment.data import get_dataloaders
 from FastAutoAugment.lr_scheduler import adjust_learning_rate_resnet
 from FastAutoAugment.metrics import accuracy, Accumulator, CrossEntropyLabelSmooth
@@ -159,6 +159,8 @@ def train_and_eval(
     only_eval=False,
     local_rank=-1,
     evaluation_interval=5,
+    cloud="",
+    bucket="",
 ):
     logger.info(
         "train_and_eval: "
@@ -297,9 +299,9 @@ def train_and_eval(
     if (
         save_path and "test.pth" not in save_path
     ):  # and is_master: --> should load all data(not able to be broadcasted)
-        if save_path and os.path.exists(save_path):
+        if save_path and os.path.exists(save_path):  # TODO jr1
             logger.info("%s file found. loading..." % save_path)
-            data = torch.load(save_path)
+            data = model_load(save_path)
             key = "model" if "model" in data else "state_dict"
 
             if "epoch" not in data:
@@ -549,7 +551,7 @@ def train_and_eval(
                         "save model@%d to %s, err=%.4f"
                         % (epoch, save_path, 1 - result["best_top1"])
                     )
-                    torch.save(
+                    model_save(
                         {
                             "epoch": epoch,
                             "log": {
