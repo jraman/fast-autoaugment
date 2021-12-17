@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 import sys
 import time
@@ -18,7 +19,14 @@ from tqdm import tqdm
 
 from FastAutoAugment.archive import remove_deplicates, policy_decoder
 from FastAutoAugment.augmentations import augment_list
-from FastAutoAugment.common import get_logger, add_filehandler, model_load, model_save, parse_path, urlunparse
+from FastAutoAugment.common import (
+    get_logger,
+    add_filehandler,
+    model_load,
+    model_save,
+    parse_path,
+    urlunparse,
+)
 from FastAutoAugment.data import get_dataloaders
 from FastAutoAugment.metrics import Accumulator
 from FastAutoAugment.networks import get_model, num_class
@@ -214,7 +222,6 @@ def eval_tta(config, augment, checkpoint_dir=None):
 
 
 if __name__ == "__main__":
-    import json
     from pystopwatch2 import PyStopwatch
 
     w = PyStopwatch()
@@ -227,6 +234,7 @@ if __name__ == "__main__":
         help="torchvision data folder",
     )
     parser.add_argument("--until", type=int, default=5)
+    parser.add_argument("--cv-ratio", type=float, default=0.4)
     parser.add_argument(
         "--num-op", type=int, default=2, help="Number of operations per policy"
     )
@@ -238,16 +246,24 @@ if __name__ == "__main__":
         help="Number of times to sample from the hyperparameter space."
         "  Set to 4 if smoke-test",
     )
-    parser.add_argument("--cv-ratio", type=float, default=0.4)
     parser.add_argument(
         "--decay", type=float, default=-1, help="Value of lambda for L2 regularization"
     )
     # parser.add_argument("--redis", type=str, default="gpu-cloud-vnode3.dakao.io:2365")
+    parser.add_argument(
+        "--cluster-url",
+        type=str,
+        default=None,
+        help="Ray cluster URL.  E.g. ray://ray://localhost:10001",
+    )
     parser.add_argument("--per-class", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--output-dir", "-o", type=str, default="/tmp")
     parser.add_argument("--board-tag", type=str, default="", help="Tensorboard tag.")
+    parser.add_argument(
+        "--creds-file", type=str, default="", help="Google Credentials File"
+    )
     args = parser.parse_args()
 
     logger.info("args: %s", args)
@@ -262,6 +278,10 @@ if __name__ == "__main__":
             logger.info("num_search set to 4 for smoke-test")
 
     cloud, bucket, output_path = parse_path(args.output_dir)
+
+    if cloud:
+        with open(args.creds_file, "r") as f:
+            C.get()["GSCREDS"] = json.load(f)
 
     if not cloud and not os.path.exists(output_path):
         os.mkdir(output_path)
@@ -281,8 +301,8 @@ if __name__ == "__main__":
     # -----------------------------------------------------------------------
     # 0. Initialize Ray
     # -----------------------------------------------------------------------
-    logger.info("initialize ray...")
-    ray.init()
+    logger.info("initialize ray.  Address: %s", args.cluster_addr)
+    ray.init(args.ray_cluster)
 
     # ray.init(local_mode=True)
     # logger.info("runtime_env: %s", env)

@@ -6,6 +6,8 @@ import warnings
 
 from google.cloud import storage as gstorage
 import torch
+from theconf import Config as C
+
 
 formatter = logging.Formatter("[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s")
 warnings.filterwarnings("ignore", "(Possibly )?corrupt EXIF data", UserWarning)
@@ -85,7 +87,7 @@ def model_load(fullpath: str):
     cloud, bucket, path = parse_path(fullpath)
     if not cloud:
         return torch.load(path)
-    client = gstorage.Client()
+    client = gstorage.Client.from_service_account_info(C.get()["GSCREDS"])
     bucket = client.get_bucket(bucket)
     blob = bucket.get_blob(path)
     if not blob:
@@ -100,7 +102,7 @@ def model_save(obj, fullpath: str):
     cloud, bucket, path = parse_path(fullpath)
     if not cloud:
         return torch.save(obj, path)
-    client = gstorage.Client()
+    client = gstorage.Client.from_service_account_info(C.get()["GSCREDS"])
     bucket = client.get_bucket(bucket)
     blob = bucket.blob(path)
     buffer = io.BytesIO()
@@ -108,3 +110,7 @@ def model_save(obj, fullpath: str):
     buffer.seek(0)
     blob.upload_from_file(buffer)
     logger.info("blob: %s", blob)
+
+
+def test_creds():
+    print(C.get()["GSCREDS"])
